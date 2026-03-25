@@ -944,6 +944,8 @@ return challengeInput ? String(challengeInput.value || '').trim() : 'not-found';
 
         if clicked:
             print(f"[*] 已填写注册资料并点击完成注册: {given_name} {family_name} / {password}")
+            # 等待服务端处理并触发重定向（accounts.x.ai -> grok.com）
+            time.sleep(6)
             return {
                 "given_name": given_name,
                 "family_name": family_name,
@@ -1021,10 +1023,12 @@ return matches.slice(0, 30);
     raise Exception("登录后未提取到可见数字文本")
 
 
-def wait_for_sso_cookie(timeout=30):
+def wait_for_sso_cookie(timeout=90):
     # 必须在注册完成后再取 sso，优先抓取精确的 sso cookie。
+    # 注册成功后 accounts.x.ai 会重定向到 grok.com 并在该域种下 sso cookie。
     deadline = time.time() + timeout
     last_seen_names = set()
+    _navigated_to_grok = False
 
     while time.time() < deadline:
         try:
@@ -1032,6 +1036,28 @@ def wait_for_sso_cookie(timeout=30):
             if page is None:
                 time.sleep(1)
                 continue
+
+            current_url = ""
+            try:
+                current_url = page.url or ""
+            except Exception:
+                pass
+
+            # 若仍停在注册页（accounts.x.ai），主动跳转到 grok.com 触发 SSO 重定向
+            if (
+                not _navigated_to_grok
+                and current_url
+                and ("accounts.x.ai" in current_url or "sign-up" in current_url)
+                and time.time() > deadline - (timeout - 15)
+            ):
+                print(f"[*] 注册后仍在 {current_url}，主动跳转到 grok.com...")
+                try:
+                    page.get("https://grok.com")
+                    _navigated_to_grok = True
+                    time.sleep(4)
+                    refresh_active_page()
+                except Exception as _nav_err:
+                    print(f"[Warn] 跳转 grok.com 失败: {_nav_err}")
 
             cookies = page.cookies(all_domains=True, all_info=True) or []
             for item in cookies:
