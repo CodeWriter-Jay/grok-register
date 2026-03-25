@@ -2,10 +2,9 @@
     "run": {
         "count": 50
     },
-    "temp_mail_api_base": "https://mail-api.example.com",
-    "temp_mail_admin_password": "<your_admin_password>",
-    "temp_mail_domain": "mail.example.com",
-    "temp_mail_site_password": "",
+    "vmail_api_base": "https://vmail.codewriterjay.org/api/v1",
+    "vmail_api_key": "<your_api_key>",
+    "temp_mail_domain": "",
     "proxy": "",
     "browser_proxy": "",
     "api": {

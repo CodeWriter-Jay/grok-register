@@ -57,5 +57,5 @@ services:
       - .:/workspace
     restart: unless-stopped
     depends_on:
-      - grok2api
+      # - grok2api
       - warp

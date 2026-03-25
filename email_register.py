@@ -22,7 +22,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============================================================
-# Cloudflare Temp Email 配置（从 config.json 加载）
+# VMAIL API 配置（从 config.json 加载）
+# 接口文档: https://vmail.codewriterjay.org/api-docs
 # ============================================================
 
 _config_path = Path(__file__).parent / "config.json"
@@ -31,18 +32,24 @@ if _config_path.exists():
     with _config_path.open("r", encoding="utf-8") as _f:
         _conf = json.load(_f)
 
-TEMP_MAIL_API_BASE = str(
-    _conf.get("temp_mail_api_base")
-    or _conf.get("duckmail_api_base")
-    or ""
-)
-TEMP_MAIL_ADMIN_PASSWORD = str(
-    _conf.get("temp_mail_admin_password")
+# API 基础地址，默认指向自建 VMAIL 实例
+VMAIL_API_BASE = str(
+    _conf.get("vmail_api_base")
+    or _conf.get("temp_mail_api_base")
+    or "https://vmail.codewriterjay.org/api/v1"
+).rstrip("/")
+
+# API Key（在 API 文档页面创建并填入 config.json）
+VMAIL_API_KEY = str(
+    _conf.get("vmail_api_key")
+    or _conf.get("temp_mail_admin_password")
     or _conf.get("duckmail_bearer")
     or ""
 )
+
+# 邮箱域名（可选，留空则由服务器随机分配）
 TEMP_MAIL_DOMAIN = str(_conf.get("temp_mail_domain", ""))
-TEMP_MAIL_SITE_PASSWORD = str(_conf.get("temp_mail_site_password", ""))
+
 PROXY = str(_conf.get("proxy", ""))
 
 # ============================================================
@@ -54,36 +61,42 @@ _temp_email_cache: Dict[str, str] = {}
 
 def get_email_and_token() -> Tuple[Optional[str], Optional[str]]:
     """
-    创建临时邮箱并返回 (email, mail_token)。
+    创建临时邮箱并返回 (email, mailbox_id)。
     供 DrissionPage_example.py 调用。
+    注：新版 API 使用 mailbox_id 代替 JWT token 来查询邮件。
     """
-    email, _password, mail_token = create_temp_email()
-    if email and mail_token:
-        _temp_email_cache[email] = mail_token
-        return email, mail_token
+    email, mailbox_id, _ = create_temp_email()
+    if email and mailbox_id:
+        _temp_email_cache[email] = mailbox_id
+        return email, mailbox_id
     return None, None
 
 
-def get_oai_code(dev_token: str, email: str, timeout: int = 30) -> Optional[str]:
+def get_oai_code(mailbox_id: str, email: str, timeout: int = 30) -> Optional[str]:
     """
     轮询收件箱获取 OTP 验证码。
     供 DrissionPage_example.py 调用。
 
+    Args:
+        mailbox_id: 创建邮箱时返回的 mailbox ID（原接口为 JWT token）
+        email: 邮箱地址（此处仅用于日志输出）
+        timeout: 最大等待秒数
+
     Returns:
         验证码字符串（去除连字符，如 "MM0SF3"）或 None
     """
-    code = wait_for_verification_code(mail_token=dev_token, timeout=timeout)
+    code = wait_for_verification_code(mailbox_id=mailbox_id, timeout=timeout)
     if code:
         code = code.replace("-", "")
     return code
 
 
 # ============================================================
-# Cloudflare Temp Email 核心函数
+# VMAIL API 核心函数
 # ============================================================
 
 def _create_session():
-    """创建请求会话（优先 curl_cffi）。"""
+    """创建请求会话（优先 curl_cffi 以绕过反爬检测）。"""
     if curl_requests:
         session = curl_requests.Session()
         session.headers.update({
@@ -111,124 +124,192 @@ def _create_session():
 
 
 def _do_request(session, use_cffi, method, url, **kwargs):
-    """统一请求，curl_cffi 自动附带 impersonate。"""
+    """统一发送请求，curl_cffi 自动附带 impersonate 指纹。"""
     if use_cffi:
         kwargs.setdefault("impersonate", "chrome131")
     return getattr(session, method)(url, **kwargs)
 
 
 def _build_headers(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """
+    构建请求 Headers。
+    VMAIL API 使用 X-API-Key 作为全局认证凭据。
+    """
     headers: Dict[str, str] = {}
-    if TEMP_MAIL_SITE_PASSWORD:
-        headers["x-custom-auth"] = TEMP_MAIL_SITE_PASSWORD
+    if VMAIL_API_KEY:
+        headers["X-API-Key"] = VMAIL_API_KEY
     if extra:
         headers.update(extra)
     return headers
 
 
 def _generate_local_part(length: int = 10) -> str:
+    """生成随机邮箱前缀（小写字母 + 数字）。"""
     chars = string.ascii_lowercase + string.digits
     return "".join(random.choice(chars) for _ in range(length))
 
 
-def create_temp_email() -> Tuple[str, str, str]:
-    """创建 Cloudflare Temp Email 地址，返回 (email, password, mail_token)。"""
-    if not TEMP_MAIL_API_BASE:
-        raise Exception("temp_mail_api_base 未设置，无法创建临时邮箱")
-    if not TEMP_MAIL_ADMIN_PASSWORD:
-        raise Exception("temp_mail_admin_password 未设置，无法创建临时邮箱")
-    if not TEMP_MAIL_DOMAIN:
-        raise Exception("temp_mail_domain 未设置，无法创建临时邮箱")
+# ============================================================
+# 邮箱管理
+# ============================================================
 
-    api_base = TEMP_MAIL_API_BASE.rstrip("/")
-    email_local = _generate_local_part(random.randint(8, 12))
-    session, use_cffi = _create_session()
-    headers = _build_headers({"x-admin-auth": TEMP_MAIL_ADMIN_PASSWORD})
-
+def get_available_domains() -> List[str]:
+    """
+    GET /domains
+    获取系统支持的可用邮箱域名列表。
+    """
     try:
-        res = _do_request(
-            session,
-            use_cffi,
-            "post",
-            f"{api_base}/admin/new_address",
-            json={
-                "name": email_local,
-                "domain": TEMP_MAIL_DOMAIN,
-                "enablePrefix": False,
-            },
-            headers=headers,
-            timeout=20,
-        )
-        if res.status_code != 200:
-            raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
-
-        data = res.json()
-        email = data.get("address") or ""
-        mail_token = data.get("jwt") or ""
-        password = data.get("password") or ""
-        if not email or not mail_token:
-            raise Exception(f"接口返回缺少 address/jwt: {data}")
-
-        print(f"[*] Cloudflare 临时邮箱创建成功: {email}")
-        return email, password, mail_token
-    except Exception as e:
-        raise Exception(f"Cloudflare 临时邮箱创建失败: {e}")
-
-
-def fetch_emails(mail_token: str) -> List[Dict[str, Any]]:
-    """获取邮件列表。"""
-    try:
-        api_base = TEMP_MAIL_API_BASE.rstrip("/")
-        headers = _build_headers({"Authorization": f"Bearer {mail_token}"})
         session, use_cffi = _create_session()
         res = _do_request(
-            session,
-            use_cffi,
-            "get",
-            f"{api_base}/api/mails",
-            params={"limit": 20, "offset": 0},
-            headers=headers,
+            session, use_cffi, "get",
+            f"{VMAIL_API_BASE}/domains",
+            headers=_build_headers(),
             timeout=20,
         )
         if res.status_code == 200:
             data = res.json()
-            if isinstance(data, dict):
-                return data.get("results") or data.get("data") or []
-    except Exception:
-        pass
+            # 响应格式: {"data": ["domain1.com", "domain2.com"]}
+            return data.get("data") or []
+    except Exception as e:
+        print(f"[!] 获取可用域名失败: {e}")
     return []
 
 
-def fetch_email_detail(mail_token: str, msg_id: str) -> Optional[Dict[str, Any]]:
-    """获取单封邮件详情。"""
+def create_temp_email() -> Tuple[str, str, str]:
+    """
+    POST /mailboxes
+    创建临时邮箱，返回 (email, mailbox_id, expires_at)。
+
+    请求体:
+        localPart  - 邮箱前缀（可选）
+        domain     - 域名（可选，须是 /domains 返回的值）
+        expiresIn  - 有效期秒数（可选，默认 3600）
+
+    响应:
+        {"data": {"id": "...", "address": "...", "expiresAt": "..."}}
+    """
+    if not VMAIL_API_KEY:
+        raise Exception("vmail_api_key 未设置，请在 config.json 中配置")
+
+    local_part = _generate_local_part(random.randint(8, 12))
+    session, use_cffi = _create_session()
+
+    # 构建请求体（domain 可选，留空则由服务端随机分配）
+    body: Dict[str, Any] = {
+        "localPart": local_part,
+        "expiresIn": 3600,
+    }
+    if TEMP_MAIL_DOMAIN:
+        body["domain"] = TEMP_MAIL_DOMAIN
+
     try:
-        api_base = TEMP_MAIL_API_BASE.rstrip("/")
-        headers = _build_headers({"Authorization": f"Bearer {mail_token}"})
+        res = _do_request(
+            session, use_cffi, "post",
+            f"{VMAIL_API_BASE}/mailboxes",
+            json=body,
+            headers=_build_headers(),
+            timeout=20,
+        )
+        if res.status_code not in (200, 201):
+            raise Exception(f"创建邮箱失败: {res.status_code} - {res.text[:200]}")
+
+        data = res.json().get("data") or {}
+        mailbox_id = data.get("id") or ""
+        email = data.get("address") or ""
+        expires_at = data.get("expiresAt") or ""
+
+        if not email or not mailbox_id:
+            raise Exception(f"接口返回缺少 id/address 字段: {data}")
+
+        print(f"[*] VMAIL 临时邮箱创建成功: {email} (id={mailbox_id})")
+        return email, mailbox_id, expires_at
+
+    except Exception as e:
+        raise Exception(f"VMAIL 临时邮箱创建失败: {e}")
+
+
+# ============================================================
+# 邮件读取
+# ============================================================
+
+def fetch_emails(mailbox_id: str) -> List[Dict[str, Any]]:
+    """
+    GET /mailboxes/:id/messages
+    获取指定邮箱的邮件列表。
+
+    Args:
+        mailbox_id: 创建邮箱时返回的 mailbox ID
+
+    Returns:
+        邮件列表（每项包含 id、subject、from 等字段）
+    """
+    try:
         session, use_cffi = _create_session()
         res = _do_request(
-            session,
-            use_cffi,
-            "get",
-            f"{api_base}/api/mail/{msg_id}",
-            headers=headers,
+            session, use_cffi, "get",
+            f"{VMAIL_API_BASE}/mailboxes/{mailbox_id}/messages",
+            params={"page": 1, "limit": 20},
+            headers=_build_headers(),
             timeout=20,
         )
         if res.status_code == 200:
             data = res.json()
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
+            # 响应格式: {"data": [...]} 或兼容旧版 {"results": [...]}
+            return (
+                data.get("data")
+                or data.get("results")
+                or (data if isinstance(data, list) else [])
+            )
+    except Exception as e:
+        print(f"[!] 获取邮件列表失败: {e}")
+    return []
+
+
+def fetch_email_detail(mailbox_id: str, message_id: str) -> Optional[Dict[str, Any]]:
+    """
+    GET /mailboxes/:id/messages/:messageId
+    获取单封邮件详情（含 HTML/text 正文）。
+
+    Args:
+        mailbox_id: mailbox ID
+        message_id: 邮件 ID
+
+    Returns:
+        邮件详情 dict 或 None
+    """
+    try:
+        session, use_cffi = _create_session()
+        res = _do_request(
+            session, use_cffi, "get",
+            f"{VMAIL_API_BASE}/mailboxes/{mailbox_id}/messages/{message_id}",
+            headers=_build_headers(),
+            timeout=20,
+        )
+        if res.status_code == 200:
+            data = res.json()
+            # 响应可能包装在 data 字段内
+            return data.get("data") if isinstance(data.get("data"), dict) else data
+    except Exception as e:
+        print(f"[!] 获取邮件详情失败 (mailbox={mailbox_id}, msg={message_id}): {e}")
     return None
 
 
-def wait_for_verification_code(mail_token: str, timeout: int = 120) -> Optional[str]:
-    """轮询临时邮箱，等待验证码邮件。"""
+def wait_for_verification_code(mailbox_id: str, timeout: int = 120) -> Optional[str]:
+    """
+    轮询邮箱，等待并提取验证码邮件。
+
+    Args:
+        mailbox_id: VMAIL mailbox ID
+        timeout: 最大等待秒数
+
+    Returns:
+        验证码字符串或 None
+    """
     start = time.time()
-    seen_ids = set()
+    seen_ids: set = set()
 
     while time.time() - start < timeout:
-        messages = fetch_emails(mail_token)
+        messages = fetch_emails(mailbox_id)
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
@@ -237,18 +318,25 @@ def wait_for_verification_code(mail_token: str, timeout: int = 120) -> Optional[
                 continue
             seen_ids.add(msg_id)
 
-            detail = fetch_email_detail(mail_token, str(msg_id))
+            detail = fetch_email_detail(mailbox_id, str(msg_id))
             if not detail:
                 continue
 
             content = _extract_mail_content(detail)
             code = extract_verification_code(content)
             if code:
-                print(f"[*] 从 Cloudflare 临时邮箱提取到验证码: {code}")
+                print(f"[*] 从 VMAIL 临时邮箱提取到验证码: {code}")
                 return code
+
         time.sleep(3)
+
+    print(f"[!] 等待验证码超时（{timeout}s）")
     return None
 
+
+# ============================================================
+# 邮件内容解析（保持不变）
+# ============================================================
 
 def _extract_mail_content(detail: Dict[str, Any]) -> str:
     """兼容 text/html/raw MIME 三种内容来源。"""
