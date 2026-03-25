@@ -7,31 +7,31 @@ services:
     cap_add:
       - NET_ADMIN
     ports:
-      - "127.0.0.1:1080:1080"
+      - '127.0.0.1:1080:1080'
 
-  grok2api:
-    image: ghcr.io/chenyme/grok2api:latest
-    working_dir: /app
-    command: ["/bin/sh", "/workspace/deploy/grok2api-entrypoint.sh"]
-    environment:
-      DATA_DIR: /app/data
-      LOG_DIR: /app/logs
-      SERVER_HOST: 0.0.0.0
-      SERVER_PORT: 8000
-      SERVER_WORKERS: 1
-      GROK2API_APP_KEY: ${GROK2API_APP_KEY:-change-this-admin-password}
-      GROK2API_API_KEY: ${GROK2API_API_KEY:-}
-      GROK2API_BASE_PROXY_URL: ${GROK2API_BASE_PROXY_URL:-socks5://warp:1080}
-      GROK2API_ASSET_PROXY_URL: ${GROK2API_ASSET_PROXY_URL:-socks5://warp:1080}
-    ports:
-      - "${GROK2API_HOST_PORT:-8000}:8000"
-    volumes:
-      - ./runtime/grok2api/data:/app/data
-      - ./runtime/grok2api/logs:/app/logs
-      - .:/workspace
-    restart: unless-stopped
-    depends_on:
-      - warp
+  # grok2api:
+  #   image: ghcr.io/chenyme/grok2api:latest
+  #   working_dir: /app
+  #   command: ["/bin/sh", "/workspace/deploy/grok2api-entrypoint.sh"]
+  #   environment:
+  #     DATA_DIR: /app/data
+  #     LOG_DIR: /app/logs
+  #     SERVER_HOST: 0.0.0.0
+  #     SERVER_PORT: 8000
+  #     SERVER_WORKERS: 1
+  #     GROK2API_APP_KEY: ${GROK2API_APP_KEY:-change-this-admin-password}
+  #     GROK2API_API_KEY: ${GROK2API_API_KEY:-}
+  #     GROK2API_BASE_PROXY_URL: ${GROK2API_BASE_PROXY_URL:-socks5://warp:1080}
+  #     GROK2API_ASSET_PROXY_URL: ${GROK2API_ASSET_PROXY_URL:-socks5://warp:1080}
+  #   ports:
+  #     - "${GROK2API_HOST_PORT:-8000}:8000"
+  #   volumes:
+  #     - ./runtime/grok2api/data:/app/data
+  #     - ./runtime/grok2api/logs:/app/logs
+  #     - .:/workspace
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - warp
 
   console:
     build:
@@ -52,7 +52,7 @@ services:
       GROK_REGISTER_DEFAULT_API_TOKEN: ${GROK_REGISTER_DEFAULT_API_TOKEN:-change-this-admin-password}
       GROK_REGISTER_DEFAULT_API_APPEND: ${GROK_REGISTER_DEFAULT_API_APPEND:-true}
     ports:
-      - "${GROK_STACK_CONSOLE_PORT:-18600}:18600"
+      - '${GROK_STACK_CONSOLE_PORT:-18600}:18600'
     volumes:
       - .:/workspace
     restart: unless-stopped
